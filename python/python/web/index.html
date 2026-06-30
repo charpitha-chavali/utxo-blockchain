@@ -190,3 +190,394 @@ function hexToBuf(hex){
   const arr = new Uint8Array(hex.length/2);
   for(let i=0;i<hex.length;i+=2) arr[i/2] = parseInt(hex.substr(i,2),16);
   return arr.buffer;
+  }
+async function sha256Hex(str){
+  const data = new TextEncoder().encode(str);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return bufToHex(digest);
+}
+function canon(obj){
+  // deterministic JSON stringify (sorted keys), like Python's sort_keys=True
+  if (Array.isArray(obj)) return '[' + obj.map(canon).join(',') + ']';
+  if (obj !== null && typeof obj === 'object'){
+    const keys = Object.keys(obj).sort();
+    return '{' + keys.map(k => JSON.stringify(k)+':'+canon(obj[k])).join(',') + '}';
+  }
+  return JSON.stringify(obj);
+}
+
+// ---------------- Wallet ----------------
+class Wallet {
+  constructor(name){ this.name = name; }
+  static async create(name){
+    const w = new Wallet(name);
+    const keyPair = await crypto.subtle.generateKey(
+      {name:"ECDSA", namedCurve:"P-256"}, true, ["sign","verify"]
+    );
+    w._privateKey = keyPair.privateKey;
+    w.publicKeyRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+    w.publicKeyHex = bufToHex(w.publicKeyRaw);
+    w.address = "UX" + (await sha256Hex(w.publicKeyHex)).slice(0,40);
+    return w;
+  }
+  async sign(payload){
+    const sig = await crypto.subtle.sign(
+      {name:"ECDSA", hash:{name:"SHA-256"}}, this._privateKey, new TextEncoder().encode(payload)
+    );
+    return bufToHex(sig);
+  }
+  static async verify(pubkeyHex, payload, sigHex){
+    try {
+      const pubKey = await crypto.subtle.importKey(
+        "raw", hexToBuf(pubkeyHex), {name:"ECDSA", namedCurve:"P-256"}, true, ["verify"]
+      );
+      return await crypto.subtle.verify(
+        {name:"ECDSA", hash:{name:"SHA-256"}}, pubKey, hexToBuf(sigHex), new TextEncoder().encode(payload)
+      );
+    } catch(e){ return false; }
+  }
+  static async addressFromPubkey(pubkeyHex){
+    return "UX" + (await sha256Hex(pubkeyHex)).slice(0,40);
+  }
+}
+
+// ---------------- Transaction ----------------
+async function makeTransaction(inputs, outputs, isCoinbase=false){
+  const tx = { inputs, outputs, timestamp: Date.now()+Math.random(), isCoinbase };
+  tx.txid = await sha256Hex(canon(tx));
+  return tx;
+}
+function signingPayload(tx){
+  return canon({
+    inputs: tx.inputs.map(i=>({txid:i.txid, index:i.index})),
+    outputs: tx.outputs, timestamp: tx.timestamp
+  });
+}
+async function makeCoinbase(minerAddress, reward){
+  return makeTransaction([], [{amount:reward, address:minerAddress}], true);
+}
+
+// ---------------- Block ----------------
+async function blockHash(block){
+  return sha256Hex(canon({
+    index: block.index, previousHash: block.previousHash,
+    transactions: block.transactions, nonce: block.nonce, timestamp: block.timestamp
+  }));
+}
+async function mineBlock(block){
+  const target = "0".repeat(DIFFICULTY);
+  block.nonce = 0;
+  block.hash = await blockHash(block);
+  let iterations = 0;
+  while(!block.hash.startsWith(target)){
+    block.nonce++;
+    block.hash = await blockHash(block);
+    iterations++;
+    if (iterations % 4000 === 0) await new Promise(r=>setTimeout(r,0)); // don't freeze the tab
+  }
+  return block;
+}
+
+// ---------------- Blockchain ----------------
+class Blockchain {
+  constructor(){
+    this.chain = [];
+    this.utxoSet = new Map();   // key "txid:index" -> {amount,address}
+    this.mempool = new Map();   // txid -> tx
+    this.reserved = new Map();  // key -> txid that reserved it
+  }
+  async init(){
+    const genesis = { index:0, previousHash:"0".repeat(64), transactions:[], nonce:0, timestamp:Date.now() };
+    await mineBlock(genesis);
+    this.chain.push(genesis);
+  }
+  lastBlock(){ return this.chain[this.chain.length-1]; }
+
+  getBalance(address){
+    let total = 0;
+    for (const out of this.utxoSet.values()) if (out.address === address) total += out.amount;
+    return total;
+  }
+  getUnspentFor(address){
+    const result = [];
+    for (const [key, out] of this.utxoSet.entries()){
+      if (out.address === address && !this.reserved.has(key)) result.push([key, out]);
+    }
+    return result;
+  }
+
+  async createTransaction(senderWallet, recipientAddress, amount, fee=0){
+    const available = this.getUnspentFor(senderWallet.address);
+    const needed = amount + fee;
+    let running = 0;
+    const chosen = [];
+    for (const [key, out] of available){
+      chosen.push([key, out]); running += out.amount;
+      if (running >= needed) break;
+    }
+    if (running < needed) throw new Error(`Insufficient balance: have ${running}, need ${needed}`);
+
+    const inputs = chosen.map(([key]) => {
+      const [txid, index] = key.split(':');
+      return {txid, index:Number(index), signature:"", pubkey: senderWallet.publicKeyHex};
+    });
+    const outputs = [{amount, address: recipientAddress}];
+    const change = running - needed;
+    if (change > 1e-9) outputs.push({amount: change, address: senderWallet.address});
+
+    const tx = await makeTransaction(inputs, outputs, false);
+    const payload = signingPayload(tx);
+    const sig = await senderWallet.sign(payload);
+    tx.inputs.forEach(i => i.signature = sig);
+    tx.txid = await sha256Hex(canon(tx)); // recompute after filling signatures
+    return tx;
+  }
+
+  async validateTransaction(tx, utxoView, spentInProgress){
+    utxoView = utxoView || this.utxoSet;
+    spentInProgress = spentInProgress || new Set();
+
+    if (tx.isCoinbase){
+      if (tx.inputs.length !== 0) return [false, "Coinbase must have no inputs"];
+      if (tx.outputs.length !== 1 || tx.outputs[0].amount > MINING_REWARD + 1e-9)
+        return [false, "Invalid coinbase reward amount"];
+      return [true, "ok"];
+    }
+    if (!tx.inputs.length) return [false, "Transaction has no inputs"];
+
+    const payload = signingPayload(tx);
+    let totalIn = 0;
+    const seen = new Set();
+
+    for (const inp of tx.inputs){
+      const key = `${inp.txid}:${inp.index}`;
+      if (seen.has(key)) return [false, "Duplicate input within same transaction"];
+      seen.add(key);
+
+      if (!utxoView.has(key)) return [false, `Input ${key} does not exist or already spent (double-spend attempt)`];
+      if (spentInProgress.has(key)) return [false, `Input ${key} already spent earlier in this batch (double-spend attempt)`];
+
+      const out = utxoView.get(key);
+      const ownerAddr = await Wallet.addressFromPubkey(inp.pubkey);
+      if (ownerAddr !== out.address) return [false, "Input pubkey does not match the owner of referenced output"];
+
+      const validSig = await Wallet.verify(inp.pubkey, payload, inp.signature);
+      if (!validSig) return [false, "Invalid signature (forged or tampered transaction)"];
+
+      totalIn += out.amount;
+    }
+
+    const totalOut = tx.outputs.reduce((s,o)=>s+o.amount, 0);
+    if (totalOut > totalIn + 1e-9) return [false, `Outputs (${totalOut}) exceed inputs (${totalIn}) -- inflation attempt`];
+
+    return [true, "ok"];
+  }
+
+  async submitTransaction(tx){
+    const [ok, msg] = await this.validateTransaction(tx);
+    if (!ok) return [false, msg];
+    for (const inp of tx.inputs){
+      const key = `${inp.txid}:${inp.index}`;
+      if (this.reserved.has(key)) return [false, `Input ${key} already used by a pending transaction (double-spend attempt)`];
+    }
+    for (const inp of tx.inputs) this.reserved.set(`${inp.txid}:${inp.index}`, tx.txid);
+    this.mempool.set(tx.txid, tx);
+    return [true, "Transaction accepted into mempool"];
+  }
+
+  async minePending(minerAddress){
+    const coinbase = await makeCoinbase(minerAddress, MINING_REWARD);
+    const blockTxs = [coinbase];
+    const spentInBlock = new Set();
+
+    for (const [txid, tx] of [...this.mempool.entries()]){
+      const [ok] = await this.validateTransaction(tx, this.utxoSet, spentInBlock);
+      if (!ok){
+        for (const inp of tx.inputs) this.reserved.delete(`${inp.txid}:${inp.index}`);
+        this.mempool.delete(txid);
+        continue;
+      }
+      for (const inp of tx.inputs) spentInBlock.add(`${inp.txid}:${inp.index}`);
+      blockTxs.push(tx);
+    }
+
+    const block = { index: this.chain.length, previousHash: this.lastBlock().hash, transactions: blockTxs, nonce:0, timestamp: Date.now() };
+    await mineBlock(block);
+    this.applyBlock(block);
+    return block;
+  }
+
+  applyBlock(block){
+    for (const tx of block.transactions){
+      for (const inp of tx.inputs){
+        const key = `${inp.txid}:${inp.index}`;
+        this.utxoSet.delete(key);
+        this.reserved.delete(key);
+      }
+      tx.outputs.forEach((out, idx) => this.utxoSet.set(`${tx.txid}:${idx}`, out));
+      this.mempool.delete(tx.txid);
+    }
+    this.chain.push(block);
+  }
+
+  async isChainValid(){
+    const rebuilt = new Map();
+    for (let idx=0; idx<this.chain.length; idx++){
+      const block = this.chain[idx];
+      if (block.index !== idx) return [false, `Block ${idx} has wrong index`];
+      const recomputed = await blockHash(block);
+      if (block.hash !== recomputed) return [false, `Block ${idx} hash mismatch (tampered block)`];
+      if (idx > 0 && block.previousHash !== this.chain[idx-1].hash) return [false, `Block ${idx} previousHash mismatch (broken chain)`];
+      if (!block.hash.startsWith("0".repeat(DIFFICULTY))) return [false, `Block ${idx} does not satisfy proof-of-work`];
+
+      const spentInBlock = new Set();
+      for (const tx of block.transactions){
+        const [ok, msg] = await this.validateTransaction(tx, rebuilt, spentInBlock);
+        if (!ok) return [false, `Block ${idx} tx ${tx.txid.slice(0,8)} invalid: ${msg}`];
+        for (const inp of tx.inputs) spentInBlock.add(`${inp.txid}:${inp.index}`);
+        for (const inp of tx.inputs) rebuilt.delete(`${inp.txid}:${inp.index}`);
+        tx.outputs.forEach((out, oidx) => rebuilt.set(`${tx.txid}:${oidx}`, out));
+      }
+    }
+    return [true, "Chain is valid"];
+  }
+}
+
+// ---------------- App / UI wiring ----------------
+const bc = new Blockchain();
+const wallets = new Map(); // name -> Wallet
+
+function refreshWalletDropdowns(){
+  const names = [...wallets.keys()];
+  const fromSel = document.getElementById('send-from');
+  const minerSel = document.getElementById('miner-select');
+  const dl = document.getElementById('wallet-names');
+  fromSel.innerHTML = names.map(n=>`<option value="${n}">${n}</option>`).join('');
+  minerSel.innerHTML = names.map(n=>`<option value="${n}">${n}</option>`).join('');
+  dl.innerHTML = names.map(n=>`<option value="${n}">`).join('');
+}
+
+function refreshWalletTable(){
+  const tbody = document.querySelector('#wallet-table tbody');
+  tbody.innerHTML = '';
+  for (const [name, w] of wallets.entries()){
+    const bal = bc.getBalance(w.address);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${name}</td><td class="addr">${w.address}</td><td class="bal">${bal}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function refreshMempool(){
+  const el = document.getElementById('mempool-list');
+  if (bc.mempool.size === 0){ el.innerHTML = '<span class="muted">empty</span>'; return; }
+  let html = '';
+  for (const [txid, tx] of bc.mempool.entries()){
+    html += `<div style="margin-bottom:10px;"><div class="muted">txid ${txid.slice(0,16)}...</div>`;
+    for (const o of tx.outputs) html += `<div>&rarr; ${o.amount} to <span class="addr">${o.address.slice(0,18)}...</span></div>`;
+    html += `</div>`;
+  }
+  el.innerHTML = html;
+}
+
+function refreshExplorer(validMsg){
+  document.getElementById('chain-status').textContent = `${bc.chain.length} block(s)`;
+  const list = document.getElementById('chain-list');
+  list.innerHTML = '';
+  for (const block of bc.chain){
+    const div = document.createElement('div');
+    div.className = 'block-card';
+    div.innerHTML = `
+      <div><strong>Block #${block.index}</strong> &middot; <span class="muted">${block.transactions.length} tx(s)</span> &middot; <span class="muted">nonce ${block.nonce}</span></div>
+      <div class="hash">${block.hash}</div>
+      <div style="margin-top:6px;">
+      ${block.transactions.map(tx => `<span class="badge ${tx.isCoinbase?'coinbase':'transfer'}">${tx.isCoinbase?'reward':'transfer'}</span> `).join('')}
+      </div>`;
+    list.appendChild(div);
+  }
+  if (validMsg) document.getElementById('validate-result').textContent = validMsg;
+}
+
+document.querySelectorAll('.tabbtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.tabbtn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'explorer') refreshExplorer();
+  });
+});
+
+document.getElementById('btn-create-wallet').addEventListener('click', async ()=>{
+  const nameInput = document.getElementById('new-wallet-name');
+  const name = nameInput.value.trim();
+  if (!name){ alert('Enter a wallet name'); return; }
+  if (wallets.has(name)){ alert('Wallet name already exists'); return; }
+  const w = await Wallet.create(name);
+  wallets.set(name, w);
+  nameInput.value = '';
+  logMsg(`Created wallet '${name}' -> ${w.address}`, 'ok');
+  refreshWalletDropdowns();
+  refreshWalletTable();
+});
+
+document.getElementById('btn-send').addEventListener('click', async ()=>{
+  const fromName = document.getElementById('send-from').value;
+  const toVal = document.getElementById('send-to').value.trim();
+  const amount = parseFloat(document.getElementById('send-amount').value);
+  const fee = parseFloat(document.getElementById('send-fee').value || "0");
+  if (!fromName || !toVal || isNaN(amount)){ alert('Fill in all fields'); return; }
+  const sender = wallets.get(fromName);
+  const recipientAddress = wallets.has(toVal) ? wallets.get(toVal).address : toVal;
+
+  let tx;
+  try{
+    tx = await bc.createTransaction(sender, recipientAddress, amount, fee);
+  } catch(e){
+    logMsg(`FAILED: ${e.message}`, 'err'); alert(e.message); return;
+  }
+  const [ok, msg] = await bc.submitTransaction(tx);
+  if (ok) logMsg(`Tx ${tx.txid.slice(0,10)}... ${fromName} -> ${toVal} amount=${amount} fee=${fee}: ${msg}`, 'ok');
+  else { logMsg(`REJECTED: ${msg}`, 'err'); alert('Rejected: '+msg); }
+  refreshMempool();
+  refreshWalletTable();
+});
+
+document.getElementById('btn-mine').addEventListener('click', async ()=>{
+  const name = document.getElementById('miner-select').value;
+  if (!name){ alert('Select a miner wallet'); return; }
+  const status = document.getElementById('mine-status');
+  status.textContent = 'mining...';
+  const miner = wallets.get(name);
+  const block = await bc.minePending(miner.address);
+  status.textContent = '';
+  logMsg(`Mined block #${block.index} hash=${block.hash.slice(0,16)}... (${block.transactions.length} tx) reward -> ${name}`, 'ok');
+
+  const lastBlockEl = document.getElementById('last-block');
+  lastBlockEl.innerHTML = `
+    <div class="hash">Hash: ${block.hash}</div>
+    <div class="muted">Prev: ${block.previousHash}</div>
+    <div class="muted">Nonce: ${block.nonce}</div>
+    <div style="margin-top:8px;">
+    ${block.transactions.map(tx => `<div><span class="badge ${tx.isCoinbase?'coinbase':'transfer'}">${tx.isCoinbase?'reward':'transfer'}</span> ${tx.outputs.map(o=>`${o.amount} &rarr; ${o.address.slice(0,16)}...`).join(', ')}</div>`).join('')}
+    </div>`;
+
+  refreshMempool();
+  refreshWalletTable();
+});
+
+document.getElementById('btn-validate').addEventListener('click', async ()=>{
+  const [valid, msg] = await bc.isChainValid();
+  document.getElementById('validate-result').textContent = `Valid: ${valid} (${msg})`;
+  logMsg(`Chain validation: ${valid} - ${msg}`, valid ? 'ok' : 'err');
+  refreshExplorer();
+});
+
+(async function start(){
+  await bc.init();
+  logMsg('Blockchain initialized. Genesis block mined.', 'info');
+  refreshExplorer();
+})();
+</script>
+</body>
+</html>
