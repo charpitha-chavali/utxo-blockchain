@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UTXO Blockchain — Browser Demo</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1d222b; --border:#2a3038;
+    --text:#e8e6e1; --muted:#8b93a1; --accent:#4ecdc4; --gold:#d4a24c; --red:#e25c5c;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
+    min-height:100vh;
+  }
+  header{
+    padding:20px 24px; border-bottom:1px solid var(--border);
+    display:flex; align-items:baseline; gap:12px;
+  }
+  header h1{font-size:18px; font-weight:600; margin:0; letter-spacing:0.3px;}
+  header span{color:var(--muted); font-size:13px; font-family:var(--mono);}
+  .wrap{max-width:980px; margin:0 auto; padding:0 24px 40px;}
+  nav{display:flex; gap:4px; margin:20px 0 16px; border-bottom:1px solid var(--border);}
+  nav button{
+    background:none; border:none; color:var(--muted); padding:10px 16px;
+    font-size:13px; cursor:pointer; border-bottom:2px solid transparent;
+    font-family:var(--sans); font-weight:500;
+  }
+  nav button.active{color:var(--accent); border-bottom-color:var(--accent);}
+  .tab{display:none;}
+  .tab.active{display:block;}
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:18px 20px; margin-bottom:16px;
+  }
+  .panel h2{font-size:13px; text-transform:uppercase; letter-spacing:0.6px; color:var(--muted); margin:0 0 14px;}
+  .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+  label{font-size:12px; color:var(--muted); display:block; margin-bottom:4px;}
+  input, select{
+    background:var(--panel2); border:1px solid var(--border); color:var(--text);
+    padding:8px 10px; border-radius:6px; font-size:13px; font-family:var(--mono);
+  }
+  input::placeholder{color:#5a6170;}
+  button.btn{
+    background:var(--accent); color:#06201d; border:none; padding:9px 16px;
+    border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;
+  }
+  button.btn:hover{opacity:0.88;}
+  button.btn.secondary{background:var(--panel2); color:var(--text); border:1px solid var(--border);}
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{text-align:left; color:var(--muted); font-weight:500; padding:6px 8px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase;}
+  td{padding:8px; border-bottom:1px solid var(--border); font-family:var(--mono); font-size:12.5px;}
+  .addr{color:var(--accent); word-break:break-all;}
+  .bal{color:var(--gold); font-weight:600;}
+  .muted{color:var(--muted);}
+  .log{
+    background:#0b0d11; border:1px solid var(--border); border-radius:8px; padding:12px;
+    font-family:var(--mono); font-size:12px; max-height:200px; overflow-y:auto; line-height:1.6;
+  }
+  .log .ok{color:var(--accent);}
+  .log .err{color:var(--red);}
+  .log .info{color:var(--muted);}
+  .block-card{
+    border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:10px;
+    background:var(--panel2);
+  }
+  .block-card .hash{font-family:var(--mono); font-size:12px; color:var(--gold); word-break:break-all;}
+  .field-grid{display:grid; grid-template-columns:1fr; gap:10px; max-width:480px;}
+  .badge{display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;}
+  .badge.coinbase{background:rgba(212,162,76,0.15); color:var(--gold);}
+  .badge.transfer{background:rgba(78,205,196,0.15); color:var(--accent);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>UTXO Blockchain</h1>
+  <span id="chain-status">genesis block only</span>
+</header>
+
+<div class="wrap">
+
+  <nav>
+    <button class="tabbtn active" data-tab="wallets">Wallets / Balance</button>
+    <button class="tabbtn" data-tab="send">Send</button>
+    <button class="tabbtn" data-tab="mine">Mine</button>
+    <button class="tabbtn" data-tab="explorer">Chain Explorer</button>
+  </nav>
+
+  <div id="tab-wallets" class="tab active">
+    <div class="panel">
+      <h2>Create wallet</h2>
+      <div class="row">
+        <input id="new-wallet-name" placeholder="wallet name e.g. alice">
+        <button class="btn" id="btn-create-wallet">Create wallet</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Wallets</h2>
+      <table id="wallet-table">
+        <thead><tr><th>Name</th><th>Address</th><th>Balance</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="tab-send" class="tab">
+    <div class="panel">
+      <h2>Send coins</h2>
+      <div class="field-grid">
+        <div>
+          <label>From wallet</label>
+          <select id="send-from"></select>
+        </div>
+        <div>
+          <label>To (pick a wallet or paste an address)</label>
+          <input id="send-to" list="wallet-names" placeholder="UX...">
+          <datalist id="wallet-names"></datalist>
+        </div>
+        <div>
+          <label>Amount</label>
+          <input id="send-amount" type="number" step="any" placeholder="10">
+        </div>
+        <div>
+          <label>Fee (optional)</label>
+          <input id="send-fee" type="number" step="any" value="0">
+        </div>
+        <div><button class="btn" id="btn-send">Sign and broadcast</button></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Mempool (pending transactions)</h2>
+      <div id="mempool-list" class="muted">empty</div>
+    </div>
+  </div>
+
+  <div id="tab-mine" class="tab">
+    <div class="panel">
+      <h2>Mine a block</h2>
+      <div class="row">
+        <select id="miner-select"></select>
+        <button class="btn" id="btn-mine">Mine block (reward 50)</button>
+        <span id="mine-status" class="muted"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Last mined block</h2>
+      <div id="last-block">not mined yet</div>
+    </div>
+  </div>
+
+  <div id="tab-explorer" class="tab">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">Chain</h2>
+        <button class="btn secondary" id="btn-validate">Validate chain</button>
+      </div>
+      <div id="validate-result" class="muted" style="margin:10px 0;"></div>
+      <div id="chain-list"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Activity log</h2>
+    <div class="log" id="log"></div>
+  </div>
+
+</div>
+
+<script>
+const MINING_REWARD = 50;
+const DIFFICULTY = 4; // leading hex zeros required
+
+function logMsg(msg, cls){
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = cls || 'info';
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function bufToHex(buf){
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function hexToBuf(hex){
+  const arr = new Uint8Array(hex.length/2);
+  for(let i=0;i<hex.length;i+=2) arr[i/2] = parseInt(hex.substr(i,2),16);
+  return arr.buffer;
+  }
+async function sha256Hex(str){
+  const data = new TextEncoder().encode(str);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return bufToHex(digest);
+}
+function canon(obj){
+  // deterministic JSON stringify (sorted keys), like Python's sort_keys=True
+  if (Array.isArray(obj)) return '[' + obj.map(canon).join(',') + ']';
+  if (obj !== null && typeof obj === 'object'){
+    const keys = Object.keys(obj).sort();
+    return '{' + keys.map(k => JSON.stringify(k)+':'+canon(obj[k])).join(',') + '}';
+  }
+  return JSON.stringify(obj);
+}
+
+// ---------------- Wallet ----------------
+class Wallet {
+  constructor(name){ this.name = name; }
+  static async create(name){
+    const w = new Wallet(name);
+    const keyPair = await crypto.subtle.generateKey(
+      {name:"ECDSA", namedCurve:"P-256"}, true, ["sign","verify"]
+    );
+    w._privateKey = keyPair.privateKey;
+    w.publicKeyRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+    w.publicKeyHex = bufToHex(w.publicKeyRaw);
+    w.address = "UX" + (await sha256Hex(w.publicKeyHex)).slice(0,40);
+    return w;
+  }
+  async sign(payload){
+    const sig = await crypto.subtle.sign(
+      {name:"ECDSA", hash:{name:"SHA-256"}}, this._privateKey, new TextEncoder().encode(payload)
+    );
+    return bufToHex(sig);
+  }
+  static async verify(pubkeyHex, payload, sigHex){
+    try {
+      const pubKey = await crypto.subtle.importKey(
+        "raw", hexToBuf(pubkeyHex), {name:"ECDSA", namedCurve:"P-256"}, true, ["verify"]
+      );
+      return await crypto.subtle.verify(
+        {name:"ECDSA", hash:{name:"SHA-256"}}, pubKey, hexToBuf(sigHex), new TextEncoder().encode(payload)
+      );
+    } catch(e){ return false; }
+  }
+  static async addressFromPubkey(pubkeyHex){
+    return "UX" + (await sha256Hex(pubkeyHex)).slice(0,40);
+  }
+}
+
+// ---------------- Transaction ----------------
+async function makeTransaction(inputs, outputs, isCoinbase=false){
+  const tx = { inputs, outputs, timestamp: Date.now()+Math.random(), isCoinbase };
+  tx.txid = await sha256Hex(canon(tx));
+  return tx;
+}
+function signingPayload(tx){
+  return canon({
+    inputs: tx.inputs.map(i=>({txid:i.txid, index:i.index})),
+    outputs: tx.outputs, timestamp: tx.timestamp
+  });
+}
+async function makeCoinbase(minerAddress, reward){
+  return makeTransaction([], [{amount:reward, address:minerAddress}], true);
+}
+
+// ---------------- Block ----------------
+async function blockHash(block){
+  return sha256Hex(canon({
+    index: block.index, previousHash: block.previousHash,
+    transactions: block.transactions, nonce: block.nonce, timestamp: block.timestamp
+  }));
+}
+async function mineBlock(block){
+  const target = "0".repeat(DIFFICULTY);
+  block.nonce = 0;
+  block.hash = await blockHash(block);
+  let iterations = 0;
+  while(!block.hash.startsWith(target)){
+    block.nonce++;
+    block.hash = await blockHash(block);
+    iterations++;
+    if (iterations % 4000 === 0) await new Promise(r=>setTimeout(r,0)); // don't freeze the tab
+  }
+  return block;
+}
+
+// ---------------- Blockchain ----------------
+class Blockchain {
+  constructor(){
+    this.chain = [];
+    this.utxoSet = new Map();   // key "txid:index" -> {amount,address}
+    this.mempool = new Map();   // txid -> tx
+    this.reserved = new Map();  // key -> txid that reserved it
+  }
+  async init(){
+    const genesis = { index:0, previousHash:"0".repeat(64), transactions:[], nonce:0, timestamp:Date.now() };
+    await mineBlock(genesis);
+    this.chain.push(genesis);
+  }
+  lastBlock(){ return this.chain[this.chain.length-1]; }
+
+  getBalance(address){
+    let total = 0;
+    for (const out of this.utxoSet.values()) if (out.address === address) total += out.amount;
+    return total;
+  }
+  getUnspentFor(address){
+    const result = [];
+    for (const [key, out] of this.utxoSet.entries()){
+      if (out.address === address && !this.reserved.has(key)) result.push([key, out]);
+    }
+    return result;
+  }
+
+  async createTransaction(senderWallet, recipientAddress, amount, fee=0){
+    const available = this.getUnspentFor(senderWallet.address);
+    const needed = amount + fee;
+    let running = 0;
+    const chosen = [];
+    for (const [key, out] of available){
+      chosen.push([key, out]); running += out.amount;
+      if (running >= needed) break;
+    }
+    if (running < needed) throw new Error(`Insufficient balance: have ${running}, need ${needed}`);
+
+    const inputs = chosen.map(([key]) => {
+      const [txid, index] = key.split(':');
+      return {txid, index:Number(index), signature:"", pubkey: senderWallet.publicKeyHex};
+    });
+    const outputs = [{amount, address: recipientAddress}];
+    const change = running - needed;
+    if (change > 1e-9) outputs.push({amount: change, address: senderWallet.address});
+
+    const tx = await makeTransaction(inputs, outputs, false);
+    const payload = signingPayload(tx);
+    const sig = await senderWallet.sign(payload);
+    tx.inputs.forEach(i => i.signature = sig);
+    tx.txid = await sha256Hex(canon(tx)); // recompute after filling signatures
+    return tx;
+  }
+
+  async validateTransaction(tx, utxoView, spentInProgress){
+    utxoView = utxoView || this.utxoSet;
+    spentInProgress = spentInProgress || new Set();
+
+    if (tx.isCoinbase){
+      if (tx.inputs.length !== 0) return [false, "Coinbase must have no inputs"];
+      if (tx.outputs.length !== 1 || tx.outputs[0].amount > MINING_REWARD + 1e-9)
+        return [false, "Invalid coinbase reward amount"];
+      return [true, "ok"];
+    }
+    if (!tx.inputs.length) return [false, "Transaction has no inputs"];
+
+    const payload = signingPayload(tx);
+    let totalIn = 0;
+    const seen = new Set();
+
+    for (const inp of tx.inputs){
+      const key = `${inp.txid}:${inp.index}`;
+      if (seen.has(key)) return [false, "Duplicate input within same transaction"];
+      seen.add(key);
+
+      if (!utxoView.has(key)) return [false, `Input ${key} does not exist or already spent (double-spend attempt)`];
+      if (spentInProgress.has(key)) return [false, `Input ${key} already spent earlier in this batch (double-spend attempt)`];
+
+      const out = utxoView.get(key);
+      const ownerAddr = await Wallet.addressFromPubkey(inp.pubkey);
+      if (ownerAddr !== out.address) return [false, "Input pubkey does not match the owner of referenced output"];
+
+      const validSig = await Wallet.verify(inp.pubkey, payload, inp.signature);
+      if (!validSig) return [false, "Invalid signature (forged or tampered transaction)"];
+
+      totalIn += out.amount;
+    }
+
+    const totalOut = tx.outputs.reduce((s,o)=>s+o.amount, 0);
+    if (totalOut > totalIn + 1e-9) return [false, `Outputs (${totalOut}) exceed inputs (${totalIn}) -- inflation attempt`];
+
+    return [true, "ok"];
+  }
+
+  async submitTransaction(tx){
+    const [ok, msg] = await this.validateTransaction(tx);
+    if (!ok) return [false, msg];
+    for (const inp of tx.inputs){
+      const key = `${inp.txid}:${inp.index}`;
+      if (this.reserved.has(key)) return [false, `Input ${key} already used by a pending transaction (double-spend attempt)`];
+    }
+    for (const inp of tx.inputs) this.reserved.set(`${inp.txid}:${inp.index}`, tx.txid);
+    this.mempool.set(tx.txid, tx);
+    return [true, "Transaction accepted into mempool"];
+  }
+
+  async minePending(minerAddress){
+    const coinbase = await makeCoinbase(minerAddress, MINING_REWARD);
+    const blockTxs = [coinbase];
+    const spentInBlock = new Set();
+
+    for (const [txid, tx] of [...this.mempool.entries()]){
+      const [ok] = await this.validateTransaction(tx, this.utxoSet, spentInBlock);
+      if (!ok){
+        for (const inp of tx.inputs) this.reserved.delete(`${inp.txid}:${inp.index}`);
+        this.mempool.delete(txid);
+        continue;
+      }
+      for (const inp of tx.inputs) spentInBlock.add(`${inp.txid}:${inp.index}`);
+      blockTxs.push(tx);
+    }
+
+    const block = { index: this.chain.length, previousHash: this.lastBlock().hash, transactions: blockTxs, nonce:0, timestamp: Date.now() };
+    await mineBlock(block);
+    this.applyBlock(block);
+    return block;
+  }
+
+  applyBlock(block){
+    for (const tx of block.transactions){
+      for (const inp of tx.inputs){
+        const key = `${inp.txid}:${inp.index}`;
+        this.utxoSet.delete(key);
+        this.reserved.delete(key);
+      }
+      tx.outputs.forEach((out, idx) => this.utxoSet.set(`${tx.txid}:${idx}`, out));
+      this.mempool.delete(tx.txid);
+    }
+    this.chain.push(block);
+  }
+
+  async isChainValid(){
+    const rebuilt = new Map();
+    for (let idx=0; idx<this.chain.length; idx++){
+      const block = this.chain[idx];
+      if (block.index !== idx) return [false, `Block ${idx} has wrong index`];
+      const recomputed = await blockHash(block);
+      if (block.hash !== recomputed) return [false, `Block ${idx} hash mismatch (tampered block)`];
+      if (idx > 0 && block.previousHash !== this.chain[idx-1].hash) return [false, `Block ${idx} previousHash mismatch (broken chain)`];
+      if (!block.hash.startsWith("0".repeat(DIFFICULTY))) return [false, `Block ${idx} does not satisfy proof-of-work`];
+
+      const spentInBlock = new Set();
+      for (const tx of block.transactions){
+        const [ok, msg] = await this.validateTransaction(tx, rebuilt, spentInBlock);
+        if (!ok) return [false, `Block ${idx} tx ${tx.txid.slice(0,8)} invalid: ${msg}`];
+        for (const inp of tx.inputs) spentInBlock.add(`${inp.txid}:${inp.index}`);
+        for (const inp of tx.inputs) rebuilt.delete(`${inp.txid}:${inp.index}`);
+        tx.outputs.forEach((out, oidx) => rebuilt.set(`${tx.txid}:${oidx}`, out));
+      }
+    }
+    return [true, "Chain is valid"];
+  }
+}
+
+// ---------------- App / UI wiring ----------------
+const bc = new Blockchain();
+const wallets = new Map(); // name -> Wallet
+
+function refreshWalletDropdowns(){
+  const names = [...wallets.keys()];
+  const fromSel = document.getElementById('send-from');
+  const minerSel = document.getElementById('miner-select');
+  const dl = document.getElementById('wallet-names');
+  fromSel.innerHTML = names.map(n=>`<option value="${n}">${n}</option>`).join('');
+  minerSel.innerHTML = names.map(n=>`<option value="${n}">${n}</option>`).join('');
+  dl.innerHTML = names.map(n=>`<option value="${n}">`).join('');
+}
+
+function refreshWalletTable(){
+  const tbody = document.querySelector('#wallet-table tbody');
+  tbody.innerHTML = '';
+  for (const [name, w] of wallets.entries()){
+    const bal = bc.getBalance(w.address);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${name}</td><td class="addr">${w.address}</td><td class="bal">${bal}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function refreshMempool(){
+  const el = document.getElementById('mempool-list');
+  if (bc.mempool.size === 0){ el.innerHTML = '<span class="muted">empty</span>'; return; }
+  let html = '';
+  for (const [txid, tx] of bc.mempool.entries()){
+    html += `<div style="margin-bottom:10px;"><div class="muted">txid ${txid.slice(0,16)}...</div>`;
+    for (const o of tx.outputs) html += `<div>&rarr; ${o.amount} to <span class="addr">${o.address.slice(0,18)}...</span></div>`;
+    html += `</div>`;
+  }
+  el.innerHTML = html;
+}
+
+function refreshExplorer(validMsg){
+  document.getElementById('chain-status').textContent = `${bc.chain.length} block(s)`;
+  const list = document.getElementById('chain-list');
+  list.innerHTML = '';
+  for (const block of bc.chain){
+    const div = document.createElement('div');
+    div.className = 'block-card';
+    div.innerHTML = `
+      <div><strong>Block #${block.index}</strong> &middot; <span class="muted">${block.transactions.length} tx(s)</span> &middot; <span class="muted">nonce ${block.nonce}</span></div>
+      <div class="hash">${block.hash}</div>
+      <div style="margin-top:6px;">
+      ${block.transactions.map(tx => `<span class="badge ${tx.isCoinbase?'coinbase':'transfer'}">${tx.isCoinbase?'reward':'transfer'}</span> `).join('')}
+      </div>`;
+    list.appendChild(div);
+  }
+  if (validMsg) document.getElementById('validate-result').textContent = validMsg;
+}
+
+document.querySelectorAll('.tabbtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.tabbtn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'explorer') refreshExplorer();
+  });
+});
+
+document.getElementById('btn-create-wallet').addEventListener('click', async ()=>{
+  const nameInput = document.getElementById('new-wallet-name');
+  const name = nameInput.value.trim();
+  if (!name){ alert('Enter a wallet name'); return; }
+  if (wallets.has(name)){ alert('Wallet name already exists'); return; }
+  const w = await Wallet.create(name);
+  wallets.set(name, w);
+  nameInput.value = '';
+  logMsg(`Created wallet '${name}' -> ${w.address}`, 'ok');
+  refreshWalletDropdowns();
+  refreshWalletTable();
+});
+
+document.getElementById('btn-send').addEventListener('click', async ()=>{
+  const fromName = document.getElementById('send-from').value;
+  const toVal = document.getElementById('send-to').value.trim();
+  const amount = parseFloat(document.getElementById('send-amount').value);
+  const fee = parseFloat(document.getElementById('send-fee').value || "0");
+  if (!fromName || !toVal || isNaN(amount)){ alert('Fill in all fields'); return; }
+  const sender = wallets.get(fromName);
+  const recipientAddress = wallets.has(toVal) ? wallets.get(toVal).address : toVal;
+
+  let tx;
+  try{
+    tx = await bc.createTransaction(sender, recipientAddress, amount, fee);
+  } catch(e){
+    logMsg(`FAILED: ${e.message}`, 'err'); alert(e.message); return;
+  }
+  const [ok, msg] = await bc.submitTransaction(tx);
+  if (ok) logMsg(`Tx ${tx.txid.slice(0,10)}... ${fromName} -> ${toVal} amount=${amount} fee=${fee}: ${msg}`, 'ok');
+  else { logMsg(`REJECTED: ${msg}`, 'err'); alert('Rejected: '+msg); }
+  refreshMempool();
+  refreshWalletTable();
+});
+
+document.getElementById('btn-mine').addEventListener('click', async ()=>{
+  const name = document.getElementById('miner-select').value;
+  if (!name){ alert('Select a miner wallet'); return; }
+  const status = document.getElementById('mine-status');
+  status.textContent = 'mining...';
+  const miner = wallets.get(name);
+  const block = await bc.minePending(miner.address);
+  status.textContent = '';
+  logMsg(`Mined block #${block.index} hash=${block.hash.slice(0,16)}... (${block.transactions.length} tx) reward -> ${name}`, 'ok');
+
+  const lastBlockEl = document.getElementById('last-block');
+  lastBlockEl.innerHTML = `
+    <div class="hash">Hash: ${block.hash}</div>
+    <div class="muted">Prev: ${block.previousHash}</div>
+    <div class="muted">Nonce: ${block.nonce}</div>
+    <div style="margin-top:8px;">
+    ${block.transactions.map(tx => `<div><span class="badge ${tx.isCoinbase?'coinbase':'transfer'}">${tx.isCoinbase?'reward':'transfer'}</span> ${tx.outputs.map(o=>`${o.amount} &rarr; ${o.address.slice(0,16)}...`).join(', ')}</div>`).join('')}
+    </div>`;
+
+  refreshMempool();
+  refreshWalletTable();
+});
+
+document.getElementById('btn-validate').addEventListener('click', async ()=>{
+  const [valid, msg] = await bc.isChainValid();
+  document.getElementById('validate-result').textContent = `Valid: ${valid} (${msg})`;
+  logMsg(`Chain validation: ${valid} - ${msg}`, valid ? 'ok' : 'err');
+  refreshExplorer();
+});
+
+(async function start(){
+  await bc.init();
+  logMsg('Blockchain initialized. Genesis block mined.', 'info');
+  refreshExplorer();
+})();
+</script>
+</body>
+</html>
